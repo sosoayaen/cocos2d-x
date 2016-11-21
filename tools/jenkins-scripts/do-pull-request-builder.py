@@ -22,6 +22,12 @@ def download_3rd_libs(branch):
     print("prepare to downloading ...")
     os.system('python download-deps.py -r no')
 
+def lint_include_of_cocos_headers():
+  global branch
+  if(branch != 'v1' and branch != 'v2'):
+      ret = os.system("python tools/coding-style/include-linter.py")
+  if(ret != 0):
+      sys.exit(1)
 
 def gen_scripting_bindings():
     global branch
@@ -36,12 +42,11 @@ def do_build_slaves():
     global branch
     global node_name
 
-    jenkins_script_path = "tools" + os.sep + "jenkins-scripts" + os.sep + "slave-scripts" + os.sep
+    jenkins_script_path = "tools" + os.sep + "jenkins-scripts" + os.sep + "slave-scripts" + os.sep + "tests" + os.sep
 
     if(branch != 'v1' and branch != 'v2'):
         slave_build_scripts = ""
         if(node_name == 'android') or (node_name == 'android_bak'):
-            # patch_cpp_empty_test()
             slave_build_scripts = jenkins_script_path + "android-build.sh"
         elif(node_name == 'win32' or node_name == 'win32_win7' or node_name == 'win32_bak'):
             slave_build_scripts = jenkins_script_path + "win32-build.bat"
@@ -76,6 +81,7 @@ def cleanup_workspace():
 
 def main():
     download_3rd_libs(branch)
+    lint_include_of_cocos_headers()
     #generate jsb and luabindings
     gen_scripting_bindings()
     #start build jobs on each slave

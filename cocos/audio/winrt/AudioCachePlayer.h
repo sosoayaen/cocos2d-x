@@ -23,7 +23,7 @@
 #ifndef __AUDIO_CACHE_PLAYER_H_
 #define __AUDIO_CACHE_PLAYER_H_
 
-#include "AudioSourceReader.h"
+#include "audio/winrt/AudioSourceReader.h"
 
 NS_CC_BEGIN
 namespace experimental{
@@ -51,18 +51,23 @@ public:
     ~AudioCache();
 
     void readDataTask();
-    void addCallback(const std::function<void()> &callback);
+    void addPlayCallback(const std::function<void()> &callback);
+    void addLoadCallback(const std::function<void(bool)> &callback);
     bool getChunk(AudioDataChunk& chunk);
     void doBuffering();
     bool isStreamingSource();
     void seek(const float ratio);
 
 protected:
+    void invokePlayCallbacks();
+    void invokeLoadCallbacks();
+    
+private:
     AudioCache(const AudioCache&);
     AudioCache& operator=(const AudioCache&); 
-    void invokeCallbacks();
 
 private:
+    bool _retry;
     bool _isReady;
     AudioInfo _audInfo;
     std::mutex _cbMutex;
@@ -70,7 +75,7 @@ private:
     std::string _fileFullPath;
     AudioSourceReader *_srcReader;
     std::vector<std::function<void()>> _callbacks;
-
+    std::vector<std::function<void(bool)>> _loadCallbacks;
 
     friend class AudioPlayer;
     friend class AudioEngineImpl;

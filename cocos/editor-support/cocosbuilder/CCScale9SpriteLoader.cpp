@@ -1,4 +1,4 @@
-#include "CCScale9SpriteLoader.h"
+#include "editor-support/cocosbuilder/CCScale9SpriteLoader.h"
 
 using namespace cocos2d;
 using namespace cocos2d::extension;
@@ -16,6 +16,12 @@ using namespace cocos2d::extension;
 #define PROPERTY_INSETBOTTOM "insetBottom"
 
 namespace cocosbuilder {
+
+ui::Scale9Sprite* Scale9SpriteLoader::createNode(cocos2d::Node* /*pParent*/, cocosbuilder::CCBReader* /*ccbReader*/) {
+    cocos2d::ui::Scale9Sprite* pNode = cocos2d::ui::Scale9Sprite::create();
+    pNode->setAnchorPoint(cocos2d::Vec2::ZERO);
+    return pNode;
+}
 
 void Scale9SpriteLoader::onHandlePropTypeSpriteFrame(Node * pNode, Node * pParent, const char * pPropertyName, SpriteFrame * pSpriteFrame, CCBReader * ccbReader) {
     if(strcmp(pPropertyName, PROPERTY_SPRITEFRAME) == 0) {

@@ -12,6 +12,7 @@ android {
     }
 
     sourceSets.main {
+        aidl.srcDir "../java/src"
         java.srcDirs = ['../java/src','../ControllerManualAdapter/src']
         manifest.srcFile "AndroidManifest.xml"
     }
@@ -25,5 +26,6 @@ android {
 }
 
 dependencies {
+    compile fileTree(dir: '../java/libs', include: ['*.jar'])
     compile fileTree(dir: '../ControllerManualAdapter/libs', include: ['*.jar'])
 }

@@ -3,7 +3,7 @@ Copyright 2011 Jeff Lamarche
 Copyright 2012 Goffredo Marocchi
 Copyright 2012 Ricardo Quesada
 Copyright 2012 cocos2d-x.org
-Copyright 2013-2014 Chukong Technologies Inc.
+Copyright 2013-2016 Chukong Technologies Inc.
 
 http://www.cocos2d-x.org
  
@@ -38,8 +38,12 @@ THE SOFTWARE.
 #include "base/CCEventType.h"
 #include "base/CCDirector.h"
 #include "base/CCEventDispatcher.h"
+#include "2d/CCCamera.h"
 
 NS_CC_BEGIN
+
+// static vector with all the registered custom binding resolvers
+std::vector<GLProgramState::AutoBindingResolver*> GLProgramState::_customAutoBindingResolvers;
 
 //
 //
@@ -150,7 +154,7 @@ void UniformValue::setCallback(const std::function<void(GLProgram*, Uniform*)> &
     if (_type == Type::CALLBACK_FN)
 		delete _value.callback;
 
-    _value.callback = new std::function<void(GLProgram*, Uniform*)>();
+    _value.callback = new (std::nothrow) std::function<void(GLProgram*, Uniform*)>();
 	*_value.callback = callback;
 
     _type = Type::CALLBACK_FN;
@@ -234,7 +238,7 @@ void UniformValue::setVec4v(ssize_t size, const Vec4* pointer)
 
 void UniformValue::setMat4(const Mat4& value)
 {
-    CCASSERT(_uniform->type == GL_FLOAT_MAT4, "");
+    CCASSERT(_uniform->type == GL_FLOAT_MAT4, "_uniform's type should be equal GL_FLOAT_MAT4.");
 	memcpy(_value.matrixValue, &value, sizeof(_value.matrixValue));
     _type = Type::VALUE;
 }
@@ -285,7 +289,7 @@ void VertexAttribValue::apply()
 
 void VertexAttribValue::setCallback(const std::function<void(VertexAttrib*)> &callback)
 {
-	_value.callback = new std::function<void(VertexAttrib*)>();
+	_value.callback = new (std::nothrow) std::function<void(VertexAttrib*)>();
 	*_value.callback = callback;
     _useCallback = true;
     _enabled = true;
@@ -306,6 +310,22 @@ void VertexAttribValue::setPointer(GLint size, GLenum type, GLboolean normalized
 // GLProgramState
 //
 //
+GLProgramState* GLProgramState::getOrCreateWithGLProgramName(const std::string& glProgramName, Texture2D* texture)
+{
+    if (texture != nullptr && texture->getAlphaTextureName() != 0) {
+        if (glProgramName == GLProgram::SHADER_NAME_POSITION_TEXTURE_COLOR) {
+            return GLProgramState::getOrCreateWithGLProgramName(GLProgram::SHADER_NAME_ETC1AS_POSITION_TEXTURE_COLOR);
+        }
+        else if (glProgramName == GLProgram::SHADER_NAME_POSITION_TEXTURE_COLOR_NO_MVP) {
+            return GLProgramState::getOrCreateWithGLProgramName(GLProgram::SHADER_NAME_ETC1AS_POSITION_TEXTURE_COLOR_NO_MVP);
+        }
+        else if (glProgramName == GLProgram::SHADER_NAME_POSITION_GRAYSCALE) {
+            return GLProgramState::getOrCreateWithGLProgramName(GLProgram::SHADER_NAME_ETC1AS_POSITION_TEXTURE_GRAY_NO_MVP);
+        }
+    }
+
+    return GLProgramState::getOrCreateWithGLProgramName(glProgramName);
+}
 
 GLProgramState* GLProgramState::create(GLProgram *glprogram)
 {
@@ -320,7 +340,7 @@ GLProgramState* GLProgramState::create(GLProgram *glprogram)
     return nullptr;
 }
 
-GLProgramState* GLProgramState::getOrCreateWithGLProgramName(const std::string &glProgramName )
+GLProgramState* GLProgramState::getOrCreateWithGLProgramName(const std::string& glProgramName )
 {
     GLProgram *glProgram = GLProgramCache::getInstance()->getGLProgram(glProgramName);
     if( glProgram )
@@ -354,9 +374,10 @@ GLProgramState* GLProgramState::getOrCreateWithShaders(const std::string& vertex
 
 GLProgramState::GLProgramState()
 : _uniformAttributeValueDirty(true)
-, _textureUnitIndex(1)
+, _textureUnitIndex(4)  // first 4 textures unites are reserved for CC_Texture0-3
 , _vertexAttribsFlags(0)
 , _glprogram(nullptr)
+, _nodeBinding(nullptr)
 {
 #if (CC_TARGET_PLATFORM == CC_PLATFORM_ANDROID || CC_TARGET_PLATFORM == CC_PLATFORM_WINRT)
     /** listen the event that renderer was recreated on Android/WP8 */
@@ -401,6 +422,13 @@ GLProgramState* GLProgramState::clone() const
     glprogramstate->_textureUnitIndex = this->_textureUnitIndex;
     glprogramstate->_boundTextureUnits = this->_boundTextureUnits;
 
+    // _nodeBinding is null since a node can only have one state.
+    // making the null explicit to avoid possible bugs in the future
+    glprogramstate->_nodeBinding = nullptr;
+
+    // copy autobindings... rebound them once a target is set again
+    glprogramstate->_autoBindings = _autoBindings;
+
     glprogramstate->autorelease();
     return glprogramstate;
 }
@@ -429,10 +457,12 @@ bool GLProgramState::init(GLProgram* glprogram)
 void GLProgramState::resetGLProgram()
 {
     CC_SAFE_RELEASE(_glprogram);
+    _glprogram = nullptr;
     _uniforms.clear();
     _attributes.clear();
     // first texture is GL_TEXTURE1
     _textureUnitIndex = 1;
+    _nodeBinding = nullptr;
 }
 
 void GLProgramState::apply(const Mat4& modelView)
@@ -457,7 +487,7 @@ void GLProgramState::updateUniformsAndAttributes()
         _vertexAttribsFlags = 0;
         for(auto& attributeValue : _attributes)
         {
-            attributeValue.second._vertexAttrib = _glprogram->getVertexAttrib(attributeValue.first);;
+            attributeValue.second._vertexAttrib = _glprogram->getVertexAttrib(attributeValue.first);
             if(attributeValue.second._enabled)
                 _vertexAttribsFlags |= 1 << attributeValue.second._vertexAttrib->index;
         }
@@ -530,7 +560,7 @@ UniformValue* GLProgramState::getUniformValue(GLint uniformLocation)
     return nullptr;
 }
 
-UniformValue* GLProgramState::getUniformValue(const std::string &name)
+UniformValue* GLProgramState::getUniformValue(const std::string& name)
 {
     updateUniformsAndAttributes();
     const auto itr = _uniformsByName.find(name);
@@ -539,7 +569,7 @@ UniformValue* GLProgramState::getUniformValue(const std::string &name)
     return nullptr;
 }
 
-VertexAttribValue* GLProgramState::getVertexAttribValue(const std::string &name)
+VertexAttribValue* GLProgramState::getVertexAttribValue(const std::string& name)
 {
     updateUniformsAndAttributes();
     const auto itr = _attributes.find(name);
@@ -549,7 +579,7 @@ VertexAttribValue* GLProgramState::getVertexAttribValue(const std::string &name)
 }
 
 // VertexAttrib Setters
-void GLProgramState::setVertexAttribCallback(const std::string &name, const std::function<void(VertexAttrib*)> &callback)
+void GLProgramState::setVertexAttribCallback(const std::string& name, const std::function<void(VertexAttrib*)> &callback)
 {
     VertexAttribValue *v = getVertexAttribValue(name);
     if(v) {
@@ -562,7 +592,7 @@ void GLProgramState::setVertexAttribCallback(const std::string &name, const std:
 	}
 }
 
-void GLProgramState::setVertexAttribPointer(const std::string &name, GLint size, GLenum type, GLboolean normalized, GLsizei stride, GLvoid *pointer)
+void GLProgramState::setVertexAttribPointer(const std::string& name, GLint size, GLenum type, GLboolean normalized, GLsizei stride, GLvoid *pointer)
 {
     auto v = getVertexAttribValue(name);
     if(v) {
@@ -577,7 +607,7 @@ void GLProgramState::setVertexAttribPointer(const std::string &name, GLint size,
 
 // Uniform Setters
 
-void GLProgramState::setUniformCallback(const std::string &uniformName, const std::function<void(GLProgram*, Uniform*)> &callback)
+void GLProgramState::setUniformCallback(const std::string& uniformName, const std::function<void(GLProgram*, Uniform*)> &callback)
 {
     auto v = getUniformValue(uniformName);
     if (v)
@@ -595,7 +625,7 @@ void GLProgramState::setUniformCallback(GLint uniformLocation, const std::functi
         CCLOG("cocos2d: warning: Uniform at location not found: %i", uniformLocation);
 }
 
-void GLProgramState::setUniformFloat(const std::string &uniformName, float value)
+void GLProgramState::setUniformFloat(const std::string& uniformName, float value)
 {
     auto v = getUniformValue(uniformName);
     if (v)
@@ -613,7 +643,7 @@ void GLProgramState::setUniformFloat(GLint uniformLocation, float value)
         CCLOG("cocos2d: warning: Uniform at location not found: %i", uniformLocation);
 }
 
-void GLProgramState::setUniformInt(const std::string &uniformName, int value)
+void GLProgramState::setUniformInt(const std::string& uniformName, int value)
 {
     auto v = getUniformValue(uniformName);
     if(v)
@@ -632,7 +662,7 @@ void GLProgramState::setUniformInt(GLint uniformLocation, int value)
 
 }
 
-void GLProgramState::setUniformFloatv(const std::string &uniformName, ssize_t size, const float* pointer)
+void GLProgramState::setUniformFloatv(const std::string& uniformName, ssize_t size, const float* pointer)
 {
     auto v = getUniformValue(uniformName);
     if (v)
@@ -650,7 +680,7 @@ void GLProgramState::setUniformFloatv(GLint uniformLocation, ssize_t size, const
         CCLOG("cocos2d: warning: Uniform at location not found: %i", uniformLocation);
 }
 
-void GLProgramState::setUniformVec2(const std::string &uniformName, const Vec2& value)
+void GLProgramState::setUniformVec2(const std::string& uniformName, const Vec2& value)
 {
     auto v = getUniformValue(uniformName);
     if (v)
@@ -668,7 +698,7 @@ void GLProgramState::setUniformVec2(GLint uniformLocation, const Vec2& value)
         CCLOG("cocos2d: warning: Uniform at location not found: %i", uniformLocation);
 }
 
-void GLProgramState::setUniformVec2v(const std::string &uniformName, ssize_t size, const Vec2* pointer)
+void GLProgramState::setUniformVec2v(const std::string& uniformName, ssize_t size, const Vec2* pointer)
 {
     auto v = getUniformValue(uniformName);
     if (v)
@@ -686,7 +716,7 @@ void GLProgramState::setUniformVec2v(GLint uniformLocation, ssize_t size, const 
         CCLOG("cocos2d: warning: Uniform at location not found: %i", uniformLocation);
 }
 
-void GLProgramState::setUniformVec3(const std::string &uniformName, const Vec3& value)
+void GLProgramState::setUniformVec3(const std::string& uniformName, const Vec3& value)
 {
     auto v = getUniformValue(uniformName);
     if (v)
@@ -704,7 +734,7 @@ void GLProgramState::setUniformVec3(GLint uniformLocation, const Vec3& value)
         CCLOG("cocos2d: warning: Uniform at location not found: %i", uniformLocation);
 }
 
-void GLProgramState::setUniformVec3v(const std::string &uniformName, ssize_t size, const Vec3* pointer)
+void GLProgramState::setUniformVec3v(const std::string& uniformName, ssize_t size, const Vec3* pointer)
 {
     auto v = getUniformValue(uniformName);
     if (v)
@@ -722,7 +752,7 @@ void GLProgramState::setUniformVec3v(GLint uniformLocation, ssize_t size, const 
         CCLOG("cocos2d: warning: Uniform at location not found: %i", uniformLocation);
 }
 
-void GLProgramState::setUniformVec4(const std::string &uniformName, const Vec4& value)
+void GLProgramState::setUniformVec4(const std::string& uniformName, const Vec4& value)
 {
     auto v = getUniformValue(uniformName);
     if (v)
@@ -740,7 +770,7 @@ void GLProgramState::setUniformVec4(GLint uniformLocation, const Vec4& value)
         CCLOG("cocos2d: warning: Uniform at location not found: %i", uniformLocation);
 }
 
-void GLProgramState::setUniformVec4v(const std::string &uniformName, ssize_t size, const Vec4* value)
+void GLProgramState::setUniformVec4v(const std::string& uniformName, ssize_t size, const Vec4* value)
 {
     auto v = getUniformValue(uniformName);
     if (v)
@@ -759,7 +789,7 @@ void GLProgramState::setUniformVec4v(GLint uniformLocation, ssize_t size, const 
 }
 
 
-void GLProgramState::setUniformMat4(const std::string &uniformName, const Mat4& value)
+void GLProgramState::setUniformMat4(const std::string& uniformName, const Mat4& value)
 {
     auto v = getUniformValue(uniformName);
     if (v)
@@ -779,7 +809,7 @@ void GLProgramState::setUniformMat4(GLint uniformLocation, const Mat4& value)
 
 // Textures
 
-void GLProgramState::setUniformTexture(const std::string &uniformName, Texture2D *texture)
+void GLProgramState::setUniformTexture(const std::string& uniformName, Texture2D *texture)
 {
     CCASSERT(texture, "Invalid texture");
     setUniformTexture(uniformName, texture->getName());
@@ -791,7 +821,7 @@ void GLProgramState::setUniformTexture(GLint uniformLocation, Texture2D *texture
     setUniformTexture(uniformLocation, texture->getName());
 }
 
-void GLProgramState::setUniformTexture(const std::string &uniformName, GLuint textureId)
+void GLProgramState::setUniformTexture(const std::string& uniformName, GLuint textureId)
 {
     auto v = getUniformValue(uniformName);
     if (v)
@@ -831,6 +861,76 @@ void GLProgramState::setUniformTexture(GLint uniformLocation, GLuint textureId)
     {
         CCLOG("cocos2d: warning: Uniform at location not found: %i", uniformLocation);
     }
+}
+
+// Auto bindings
+void GLProgramState::setParameterAutoBinding(const std::string& uniformName, const std::string& autoBinding)
+{
+    _autoBindings[uniformName] = autoBinding;
+
+    if (_nodeBinding)
+        applyAutoBinding(uniformName, autoBinding);
+}
+
+void GLProgramState::applyAutoBinding(const std::string& uniformName, const std::string& autoBinding)
+{
+    // This code tries to replace GLProgram::setUniformsForBuiltins. But it is unfinished ATM.
+    // The idea is that users will be able to use variables from cocos2d-x without hardcoding the
+    // information on GLProgram and other objects.
+    // Instead, the Cocos2d uniform variables will be callbacks.
+    // As an example of how bad the current design is, the ModelView matrix is being passed from Node, to the Commands, to the GLProgram.
+    // Instead, the GLProgramState should obtain it from its target.
+
+    bool resolved = false;
+    for (const auto resolver: _customAutoBindingResolvers)
+    {
+        resolved = resolver->resolveAutoBinding(this, _nodeBinding, uniformName, autoBinding);
+        if (resolved)
+            break;
+    }
+
+    if (!resolved)
+    {
+        // add cocos2d-x variables here like:
+        // PROJECT_MATRIX
+        // MODEL_MATRIX
+        // MODEL_VIEW
+        // MODEL_VIEW_PROJECTION
+        // etc...
+        //
+        // and remove them from GLProgram::setUniformsForBuiltins
+    }
+}
+
+void GLProgramState::setNodeBinding(Node* target)
+{
+    CCASSERT(target, "must be non-null");
+
+    // weak ref
+    _nodeBinding = target;
+
+    for (const auto autobinding: _autoBindings)
+        applyAutoBinding(autobinding.first, autobinding.second);
+}
+
+Node* GLProgramState::getNodeBinding() const
+{
+    return _nodeBinding;
+}
+
+//
+// MARK: AutoBindingResolver
+//
+GLProgramState::AutoBindingResolver::AutoBindingResolver()
+{
+    _customAutoBindingResolvers.push_back(this);
+}
+
+GLProgramState::AutoBindingResolver::~AutoBindingResolver()
+{
+    std::vector<GLProgramState::AutoBindingResolver*>::iterator itr = std::find(_customAutoBindingResolvers.begin(), _customAutoBindingResolvers.end(), this);
+    if (itr != _customAutoBindingResolvers.end())
+        _customAutoBindingResolvers.erase(itr);
 }
 
 NS_CC_END
